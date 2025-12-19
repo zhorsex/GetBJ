@@ -1,0 +1,16 @@
+{
+  "name": "hydration-price-monitor",
+  "version": "1.0.0",
+  "description": "基于 GalacticCouncil SDK 的多币对价格监控与邮件预警程序",
+  "main": "monitor.js",
+  "scripts": {
+    "start": "node monitor.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@galacticcouncil/api-augment": "^0.9.0",
+    "@galacticcouncil/sdk": "^10.4.0",
+    "@polkadot/api": "^16.5.4",
+    "nodemailer": "^7.0.11"
+  }
+}
