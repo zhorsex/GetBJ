@@ -3,7 +3,13 @@ const { ApiPromise, WsProvider } = require('@polkadot/api');
 const sendEmail = require('./aitomail.cjs');
 
 // 配置
-const NODE_URL = 'wss://hydration-rpc.n.dwellir.com';
+const NODE_URLS = [
+    'wss://rpc.hydration.net',
+    'wss://hydration-rpc.dw.homi.sendnode.io',
+    'wss://hydration-rpc.n.dwellir.com',
+    'wss://hydration.api.onfinality.io/public-ws'
+];
+let currentNodeIndex = 0;
 const POLL_INTERVAL_MS = 30000; // 30 秒
 const RECONNECT_DELAY_MS = 15000; // 重连延迟 15 秒
 const HEALTH_CHECK_INTERVAL_MS = 60000; // 健康检查间隔 60 秒
@@ -181,12 +187,19 @@ async function triggerReconnect() {
     isReconnecting = true;
     console.log(`[RECONNECT] Will reconnect in ${RECONNECT_DELAY_MS / 1000} seconds...`);
 
+    // 切换到下一个节点（轮询）
+    currentNodeIndex = (currentNodeIndex + 1) % NODE_URLS.length;
+    console.log(`[RECONNECT] Switched to next node: ${NODE_URLS[currentNodeIndex]}`);
+
     await cleanup();
 
     setTimeout(async () => {
-        isReconnecting = false;
-        consecutiveErrors = 0;
-        await connect();
+        try {
+            await connect();
+        } finally {
+            // 只有在一次完整的尝试（成功或失败进入重试队列）后才释放锁
+            isReconnecting = false;
+        }
     }, RECONNECT_DELAY_MS);
 }
 
@@ -243,15 +256,19 @@ async function healthCheck() {
 }
 
 async function connect() {
+    const nodeUrl = NODE_URLS[currentNodeIndex];
     try {
-        console.log(`[CONNECT] Connecting to ${NODE_URL}...`);
-        provider = new WsProvider(NODE_URL, 5000); // 5秒自动重连
+        console.log(`[CONNECT] Connecting to ${nodeUrl}...`);
+
+        // 确保之前的资源已释放
+        await cleanup();
+
+        provider = new WsProvider(nodeUrl, 5000);
 
         // 重连日志
         provider.on('disconnected', () => {
-            console.log('[WS] Disconnected from node. Auto-reconnect will be attempted by WsProvider...');
+            console.log('[WS] Disconnected from node.');
             isConnected = false;
-            // 重置断线计数，让健康检查开始计时
             disconnectedCount = 0;
         });
 
@@ -263,57 +280,54 @@ async function connect() {
 
         provider.on('error', (error) => {
             console.error('[WS] Connection error:', error.message);
-            consecutiveErrors++;
         });
 
-        api = await ApiPromise.create({ provider });
+        // 增加硬超时：40秒内无法建立 API
+        api = await Promise.race([
+            ApiPromise.create({ provider }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout (40s)')), 40000))
+        ]);
 
-        // 等待 API 准备就绪
         await api.isReady;
 
         sdk = await createSdkContext(api);
         console.log('[CONNECT] SDK initialized successfully.');
 
-        // 发送重连成功提醒（跳过首次启动）
+        // 发送重连成功提醒
         if (!isFirstConnect) {
             try {
-                sendEmail('JGJK - 重连成功', `✅ 服务已重新连接\n时间: ${new Date().toLocaleString('zh-CN')}`);
-            } catch (e) { console.error('Failed to send success email:', e); }
+                sendEmail('JGJK - 重连成功', `✅ 服务已重新连接\n节点: ${nodeUrl}\n时间: ${new Date().toLocaleString('zh-CN')}`);
+            } catch (e) { }
         }
         isFirstConnect = false;
-
-        // 记录连接时间，用于稳定期检测
+        consecutiveErrors = 0;
         lastConnectTime = Date.now();
-        console.log(`[CONNECT] Stabilization period started: ${STABILIZATION_PERIOD_MS / 1000}s before alert processing.`);
 
-        // 初始化状态（如果尚未初始化）
         PAIRS.forEach(pair => {
             if (!pairStates.has(pair.name)) {
                 pairStates.set(pair.name, { referencePrice: null });
             }
         });
 
-        // 开始监控循环
         monitorLoop();
 
-        // 开始健康检查
-        if (healthCheckIntervalId) {
-            clearInterval(healthCheckIntervalId);
-        }
+        if (healthCheckIntervalId) clearInterval(healthCheckIntervalId);
         healthCheckIntervalId = setInterval(healthCheck, HEALTH_CHECK_INTERVAL_MS);
 
     } catch (error) {
         console.error('[CONNECT] Failed to initialize:', error.message);
+        isConnected = false;
 
-        // 如果是初始化失败，且连续错误较多，也发送邮件提醒
+        // 切换节点尝试下一次重连
+        currentNodeIndex = (currentNodeIndex + 1) % NODE_URLS.length;
+
         if (consecutiveErrors > 0 && consecutiveErrors % 5 === 0) {
             try {
-                sendEmail('JGJK - 初始化失败', `❌ 无法连接到节点，正在重试...\n错误: ${error.message}`);
+                sendEmail('JGJK - 初始化失败', `❌ 无法连接到节点，正在尝试切换...\n错误: ${error.message}`);
             } catch (e) { }
         }
 
-        // 如果初始连接失败，延迟后重试连接
-        console.log(`[CONNECT] Will retry in ${RECONNECT_DELAY_MS / 1000} seconds...`);
+        console.log(`[CONNECT] Will retry in ${RECONNECT_DELAY_MS / 1000} seconds using next node...`);
         setTimeout(connect, RECONNECT_DELAY_MS);
     }
 }
