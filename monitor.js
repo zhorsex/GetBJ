@@ -462,6 +462,7 @@ async function monitorLoop() {
                     if (diff >= pair.threshold) {
                         const changeAmount = currentPrice - state.referencePrice; // 正负值，非绝对值
                         const sign = changeAmount >= 0 ? '+' : '';
+                        const arrow = changeAmount >= 0 ? '📈' : '📉';
 
                         // 构建报警主消息
                         let message = `⚠️ 价格变动提醒: ${pair.name}\n\n`;
@@ -496,7 +497,7 @@ async function monitorLoop() {
                         console.log(`[ALERT] ${pair.name} triggered alert. Diff: ${diff.toFixed(4)}`);
 
                         // 发送邮件
-                        sendEmail(`JGJK - ${pair.name} 价格变动`, message);
+                        sendEmail(`JGJK - ${arrow} ${pair.name} ${currentPrice.toFixed(4)}`, message);
 
                         // 更新参考价格
                         state.referencePrice = currentPrice;
