@@ -372,6 +372,7 @@ async function monitorLoop() {
     let statusMessage = "监控程序已启动 (Monitor Started)\n\n";
     let hasUpdates = false;
 
+    // 初始价格获取循环
     for (const pair of PAIRS) {
         const state = pairStates.get(pair.name);
         if (!state.referencePrice) {
@@ -425,50 +426,89 @@ async function monitorLoop() {
             // 检查是否在稳定期
             const inStabilization = isInStabilizationPeriod();
 
+            // 1. 获取本轮所有币对的价格
+            const currentCyclePrices = new Map(); // 存储: pairName -> price (number)
+
             for (const pair of PAIRS) {
                 try {
                     const priceData = await getSpotPrice(pair.assetIn, pair.assetOut);
                     const currentPrice = formatPrice(priceData);
 
-                    // 检查价格有效性
-                    if (!isValidPrice(currentPrice, pair.name)) {
-                        continue;
-                    }
-
-                    console.log(`[PRICE] ${pair.name}: ${currentPrice.toFixed(4)}`);
-
-                    const state = pairStates.get(pair.name);
-
-                    // 如果在稳定期，只更新参考价格，不进行比较
-                    if (inStabilization) {
-                        state.referencePrice = currentPrice;
-                        continue;
-                    }
-
-                    if (state.referencePrice) {
-                        const diff = Math.abs(currentPrice - state.referencePrice);
-                        if (diff >= pair.threshold) {
-                            const message = `Old: ${state.referencePrice.toFixed(4)} \nNew: ${currentPrice.toFixed(4)} \n ${pair.name} 价格变动 ${diff.toFixed(4)}。`;
-                            console.log(`[ALERT] ${message}`);
-
-                            // 发送邮件
-                            sendEmail('JGJK', message);
-
-                            // 更新参考价格
-                            state.referencePrice = currentPrice;
-                        }
-                    } else {
-                        // 如果之前获取初始价格失败，现在设置它
-                        state.referencePrice = currentPrice;
-                        console.log(`[INIT] ${pair.name} Price set to: ${state.referencePrice.toFixed(4)}`);
+                    if (isValidPrice(currentPrice, pair.name)) {
+                        currentCyclePrices.set(pair.name, currentPrice);
+                        console.log(`[PRICE] ${pair.name}: ${currentPrice.toFixed(4)}`);
                     }
                 } catch (pairError) {
-                    console.error(`[MONITOR] Error processing ${pair.name}:`, pairError.message);
-                    consecutiveErrors++;
+                    console.error(`[MONITOR] Error fetching ${pair.name}:`, pairError.message);
+                    // 即使获取失败，也不影响其他币对的逻辑，只是该币对在本轮没有价格
                 }
             }
 
-            // 重置连续错误计数（如果循环完成没有问题）
+            // 2. 检查价格变动并触发报警
+            for (const pair of PAIRS) {
+                if (!currentCyclePrices.has(pair.name)) continue;
+
+                const currentPrice = currentCyclePrices.get(pair.name);
+                const state = pairStates.get(pair.name);
+
+                // 如果在稳定期，只更新参考价格，不进行比较
+                if (inStabilization) {
+                    state.referencePrice = currentPrice;
+                    continue;
+                }
+
+                if (state.referencePrice) {
+                    const diff = Math.abs(currentPrice - state.referencePrice);
+                    if (diff >= pair.threshold) {
+                        const changeAmount = currentPrice - state.referencePrice; // 正负值，非绝对值
+                        const sign = changeAmount >= 0 ? '+' : '';
+
+                        // 构建报警主消息
+                        let message = `⚠️ 价格变动提醒: ${pair.name}\n\n`;
+                        message += `Old: ${state.referencePrice.toFixed(4)}\n`;
+                        message += `New: ${currentPrice.toFixed(4)}\n`;
+                        message += `变动: ${sign}${changeAmount.toFixed(4)} (阈值: ${pair.threshold})\n\n`;
+
+                        // 构建"当前市场状态"部分
+                        message += `📊 当前市场状态:\n`;
+
+                        for (const p of PAIRS) {
+                            const pPrice = currentCyclePrices.get(p.name);
+                            // 标记触发报警的币对
+                            const pointer = p.name === pair.name ? '👉' : '  ';
+
+                            if (pPrice !== undefined) {
+                                // 尝试计算相对于该币对自身参考价格的变动百分比（仅作参考显示）
+                                const pState = pairStates.get(p.name);
+                                let extraInfo = '';
+                                if (pState && pState.referencePrice) {
+                                    const pDiff = pPrice - pState.referencePrice;
+                                    const pPercent = ((pDiff / pState.referencePrice) * 100).toFixed(2);
+                                    extraInfo = ` (${pDiff >= 0 ? '+' : ''}${pPercent}%)`;
+                                }
+
+                                message += `${pointer} ${p.name}: ${pPrice.toFixed(4)}${extraInfo}\n`;
+                            } else {
+                                message += `${pointer} ${p.name}: [获取失败]\n`;
+                            }
+                        }
+
+                        console.log(`[ALERT] ${pair.name} triggered alert. Diff: ${diff.toFixed(4)}`);
+
+                        // 发送邮件
+                        sendEmail(`JGJK - ${pair.name} 价格变动`, message);
+
+                        // 更新参考价格
+                        state.referencePrice = currentPrice;
+                    }
+                } else {
+                    // 如果之前没有参考价格，现在设置它
+                    state.referencePrice = currentPrice;
+                    console.log(`[INIT] ${pair.name} Price set to: ${state.referencePrice.toFixed(4)}`);
+                }
+            }
+
+            // 重置连续错误计数（如果循环完成没有严重报错）
             consecutiveErrors = 0;
 
         } catch (error) {
